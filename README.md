@@ -53,8 +53,8 @@ Create a `.env` file:
 AWS_ACCESS_KEY_ID=YOUR_KEY  
 AWS_SECRET_ACCESS_KEY=YOUR_SECRET  
 AWS_REGION=eu-central-1  
-S3_BUCKET_NAME=s3-solar-park-module-images  
-S3_PREFIX=rgb/  
+S3_BUCKET_NAME=s3-solar-park-module-images-raw  
+S3_PREFIX=rgb/raw/  
 
 If empty, uploads will be skipped.
 
