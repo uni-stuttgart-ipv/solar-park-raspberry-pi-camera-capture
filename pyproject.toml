@@ -22,7 +22,7 @@ classifiers = [
   "Programming Language :: Python :: Implementation :: CPython",
   "Programming Language :: Python :: Implementation :: PyPy",
 ]
-dependencies = ["botocore", "boto3", "ids-peak", "ids-peak-ipl", "influxdb-client-3"]
+dependencies = ["botocore", "boto3", "ids-peak", "ids-peak-ipl", "influxdb3-python"]
 
 [project.urls]
 Documentation = "https://github.com/unknown/solar-park-ids-rgb-image-capture#readme"
