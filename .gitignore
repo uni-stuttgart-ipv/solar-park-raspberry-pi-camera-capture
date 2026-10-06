@@ -18,3 +18,4 @@ dist/
 *.jpeg
 *.png
 *.bmp
+.DS_Store
