@@ -1,29 +1,150 @@
 import os
 import sys
 import time
-from datetime import datetime
+import logging
+import datetime as dt
+from dataclasses import dataclass
 
-import boto3
-import botocore
 from ids_peak import ids_peak as peak
 from ids_peak_ipl import ids_peak_ipl as ipl
+from . import store
+
+LOG_FILE = "/home/vinni/rgb_camera_data_pipeline.log"
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    filename=LOG_FILE,
+    encoding="utf-8",
+    level=logging.INFO,
+    format='{"time"="%(asctime)s", %(message)s}',
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+CAMERA_ID = "ids_rgb_cam"
+
+CAMERA_BRIGHTNESS_MIN = 15
+CAMERA_BRIGHTNESS_MAX = 240
+CAMERA_MAX_SATURATED_FRACTION = 0.15
+
+# Minimum time between stored images.
+CAMERA_CAPTURE_FREQUENCY_SEC = 30 * 60
+# Maximum time between stored images
+CAMERA_MAX_TIME_BETWEEN_CAPTURES_SEC = 40 * 60
 
 m_device = None
 m_dataStream = None
 m_node_map_remote_device = None
 
 
-S3_BUCKET = os.getenv("S3_BUCKET_NAME")
-S3_PREFIX = os.getenv("S3_PREFIX", "rgb/")
-AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID")
-AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY")
-DELETE_LOCAL_AFTER_UPLOAD = True
+def log_data(level: int, camera: "Camera", data: dict):
+    msg = f'"camera": "{camera.id}"'
+    for key, value in data.items():
+        msg += f', "{key}": "{value}"'
+    logger.log(level, msg)
 
-s3 = boto3.client(
-    "s3",
-    aws_access_key_id=AWS_ACCESS_KEY_ID,
-    aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
-)
+
+@dataclass
+class MeasurementConfig:
+    brightness_min: float
+    brightness_max: float
+    max_saturated_fraction: float
+    capture_freq_sec: int
+    max_period_between_captures_sec: int
+
+class Camera:
+    def __init__(self, id: str, measurement_config: MeasurementConfig):
+        self.active = True
+        self.measurement_config = measurement_config
+        self._id = id
+        self._last_stored_time: None | dt.datetime = None
+
+    @property
+    def id(self) -> str:
+        return self._id
+
+    def min_time_between_captures_has_elapsed(self, time: dt.datetime) -> bool:
+        if self._last_stored_time is None:
+            return True
+
+        elapsed = time - self._last_stored_time
+        return elapsed.total_seconds() >= self.measurement_config.capture_freq_sec
+
+    def max_time_between_captures_has_elapsed(self, time: dt.datetime) -> bool:
+        if self._last_stored_time is None:
+            return True
+
+        elapsed = time - self._last_stored_time
+        exceeded = (
+            elapsed.total_seconds()
+            >= self.measurement_config.max_period_between_captures_sec
+        )
+        log_data(
+            logging.DEBUG,
+            self,
+            dict(
+                event="capture_validation", property="max_period_between_captures_sec", value=exceeded,
+            ),
+        )
+
+        return exceeded
+
+    def image_surpasses_brightness_min_threshold(self, mean_intensity: float) -> bool:
+        exceeded = mean_intensity >= self.measurement_config.brightness_min
+        log_data(
+            logging.DEBUG,
+            self,
+            dict(event="capture_validation", property="brightness_min", value=exceeded),
+        )
+        return exceeded
+
+    def image_surpasses_brightness_max_threshold(self, mean_intensity: float) -> bool:
+        exceeded = mean_intensity <= self.measurement_config.brightness_max
+        log_data(
+            logging.DEBUG,
+            self,
+            dict(event="capture_validation", property="brightness_max", value=exceeded),
+        )
+        return exceeded
+
+    def image_surpasses_saturation_threshold(self, saturated_fraction: float) -> bool:
+        exceeded = saturated_fraction <= self.measurement_config.max_saturated_fraction
+        log_data(
+            logging.DEBUG,
+            self,
+            dict(
+                event="capture_validation", property="max_saturated_fraction", value=exceeded,
+            ),
+        )
+        return exceeded
+
+    def image_should_be_stored(
+        self, time: dt.datetime, mean_intensity: float, saturated_fraction: float
+    ) -> bool:
+        if not self.image_surpasses_brightness_min_threshold(mean_intensity):
+            return False
+        if not self.image_surpasses_brightness_max_threshold(mean_intensity):
+            return False
+        if not self.image_surpasses_saturation_threshold(saturated_fraction):
+            return False
+
+        self.max_time_between_captures_has_elapsed(time)
+        return True
+
+    def set_last_stored_time(self, time: dt.datetime):
+        self._last_stored_time = time
+
+
+CAMERAS = [
+    Camera(
+        CAMERA_ID,
+        MeasurementConfig(
+            CAMERA_BRIGHTNESS_MIN,
+            CAMERA_BRIGHTNESS_MAX,
+            CAMERA_MAX_SATURATED_FRACTION,
+            CAMERA_CAPTURE_FREQUENCY_SEC,
+            CAMERA_MAX_TIME_BETWEEN_CAPTURES_SEC,
+        ),
+    )
+]
 
 
 def open_camera():
@@ -41,9 +162,8 @@ def open_camera():
                 m_node_map_remote_device = m_device.RemoteDevice().NodeMaps()[0]
                 return True
     except Exception as e:
-        print(f"Camera open error: {e}")
+        log_data(logging.ERROR, CAMERAS[0], dict(event="camera_open_error", error=str(e)))
         return False
-
 
 def prepare_acquisition():
     global m_dataStream
@@ -54,9 +174,8 @@ def prepare_acquisition():
         m_dataStream = data_streams[0].OpenDataStream()
         return True
     except Exception as e:
-        print(f"Acquisition error: {e}")
+        log_data(logging.ERROR, CAMERAS[0], dict(event="acquisition_prepare_error", error=str(e)))
         return False
-
 
 def set_roi(x, y, width, height):
     m_color_corrector_ipl = ipl.ColorCorrector()
@@ -131,7 +250,7 @@ def set_roi(x, y, width, height):
 
         return True
     except Exception as e:
-        print(f"ROI error: {e}")
+        log_data(logging.ERROR, CAMERAS[0], dict(event="roi_error", error=str(e)))
         return False
 
 
@@ -152,9 +271,8 @@ def alloc_and_announce_buffers():
 
         return True
     except Exception as e:
-        print(f"Buffer allocation error: {e}")
+        log_data(logging.ERROR, CAMERAS[0], dict(event="buffer_alloc_error", error=str(e)))
         return False
-
 
 def start_acquisition():
     try:
@@ -163,72 +281,42 @@ def start_acquisition():
         )
         m_node_map_remote_device.FindNode("TLParamsLocked").SetValue(1)
         m_node_map_remote_device.FindNode("AcquisitionStart").Execute()
-        print("Acquisition started successfully.")
+        log_data(logging.INFO, CAMERAS[0], dict(event="acquisition_started"))
         return True
     except Exception as e:
-        print(f"Acquisition start error: {e}")
+        log_data(logging.ERROR, CAMERAS[0], dict(event="acquisition_start_error", error=str(e)))
         return False
 
-
-def upload_local_file_to_s3(local_path: str, index: int):
-    if not S3_BUCKET:
-        print("S3_BUCKET_NAME env var not set. Skipping S3 upload.")
-        return False
-
-    # key pattern: camera_raw/YYYY/MM/DD/UTC_timestamp_000123.jpg
-    now = datetime.utcnow()
-    base_name = os.path.basename(local_path)
-    key = f"{S3_PREFIX}{now:%Y/%m/%d}/{now:%Y%m%dT%H%M%SZ}_{index:06}.jpg"
-
-    try:
-        s3.upload_file(
-            local_path, S3_BUCKET, key, ExtraArgs={"ContentType": "image/jpeg"}
-        )
-        print(f"Uploaded to s3://{S3_BUCKET}/{key}")
-        if DELETE_LOCAL_AFTER_UPLOAD:
-            try:
-                os.remove(local_path)
-            except:
-                pass
-        return True
-    except botocore.exceptions.ClientError as e:
-        code = e.response.get("Error", {}).get("Code")
-        print(f"S3 upload failed ({code}): {e}")
-        return False
-    except Exception as e:
-        print(f"S3 upload failed: {e}")
-        return False
+def image_exposure_metrics(image_rgb: "ipl.Image") -> tuple[float, float]:
+    width = image_rgb.Width()
+    height = image_rgb.Height()
+    arr = image_rgb.get_numpy_1D().reshape((height, width, 4))
+    rgb = arr[:, :, :3]  # drop alpha channel
+    luminance = rgb.mean(axis=2)  # simple average; swap for 0.299R+0.587G+0.114B for perceptual luma
+    mean_intensity = float(luminance.mean())
+    saturated_fraction = float((luminance >= 255).sum() / luminance.size)
+    return mean_intensity, saturated_fraction
 
 
-def save_image(num_images=2):
+def acquire_image() -> "ipl.Image | None":
     m_hotpixel_correction = ipl.HotpixelCorrection()
     try:
-        for i in range(num_images):
-            buffer = m_dataStream.WaitForFinishedBuffer(5000)
-            image = ipl.Image.CreateFromSizeAndBuffer(
-                buffer.PixelFormat(),
-                buffer.BasePtr(),
-                buffer.Size(),
-                buffer.Width(),
-                buffer.Height(),
-            )
-            vec = m_hotpixel_correction.Detect(image)
-            image = m_hotpixel_correction.Correct(image, vec)
-            image_rgb = image.ConvertTo(
-                ipl.PixelFormatName_RGBa8, ipl.ConversionMode_Fast
-            )
-            filename = f"/home/vinni/images7/image_{i:03}.jpg"
-            ipl.ImageWriter.Write(filename, image_rgb)
-            print(f"[{i + 1}/{num_images}] Saved: {filename}")
-
-            upload_local_file_to_s3(filename, i)
-
-            m_dataStream.QueueBuffer(buffer)
-            time.sleep(9)
-        return True
+        buffer = m_dataStream.WaitForFinishedBuffer(5000)
+        image = ipl.Image.CreateFromSizeAndBuffer(
+            buffer.PixelFormat(),
+            buffer.BasePtr(),
+            buffer.Size(),
+            buffer.Width(),
+            buffer.Height(),
+        )
+        vec = m_hotpixel_correction.Detect(image)
+        image = m_hotpixel_correction.Correct(image, vec)
+        image_rgb = image.ConvertTo(ipl.PixelFormatName_RGBa8, ipl.ConversionMode_Fast)
+        m_dataStream.QueueBuffer(buffer)
+        return image_rgb
     except Exception as e:
-        print(f"Image save error: {e}")
-        return False
+        log_data(logging.ERROR, CAMERAS[0], dict(event="acquisition_failure", error=str(e)))
+        return None
 
 
 def main():
@@ -247,12 +335,63 @@ def main():
         sys.exit(-4)
     if not start_acquisition():
         sys.exit(-5)
-    if not save_image():
-        sys.exit(-6)
 
-    peak.Library.Close()
-    sys.exit(0)
+    while True:
+        time.sleep(5)
+
+        for camera in CAMERAS:
+            if not camera.active:
+                continue
+            if not camera.min_time_between_captures_has_elapsed(dt.datetime.now()):
+                continue
+
+            image_rgb = acquire_image()
+            timestamp = dt.datetime.now()
+            if image_rgb is None:
+                log_data(logging.ERROR, camera, dict(event="acquisition_failure"))
+                continue
+
+            mean_intensity, saturated_fraction = image_exposure_metrics(image_rgb)
+
+            if not camera.image_should_be_stored(timestamp, mean_intensity, saturated_fraction):
+                log_data(
+                    logging.INFO,
+                    camera,
+                    dict(
+                        event="image_rejected_exposure",
+                        mean_intensity=round(mean_intensity, 2),
+                        saturated_fraction=round(saturated_fraction, 4),
+                    ),
+                )
+                continue
+
+            filename = f"/home/vinni/images7/image_{timestamp:%Y%m%d%H%M%S}.jpg"
+            ipl.ImageWriter.Write(filename, image_rgb)
+            log_data(logging.INFO, camera, dict(event="image_saved_local", path=filename))
+
+            s3_object_key = store.store_image_in_s3(filename, timestamp, camera.id)
+            if s3_object_key is None:
+                log_data(logging.ERROR, camera, dict(event="storage_failure"))
+                continue
+
+            try:
+                os.remove(filename)
+            except OSError:
+                pass
+
+            store.register_image_in_influxdb(timestamp, s3_object_key, camera.id)
+            camera.set_last_stored_time(timestamp)
+            log_data(
+                logging.INFO,
+                camera,
+                dict(
+                    event="image_stored",
+                    mean_intensity=round(mean_intensity, 2),
+                    saturated_fraction=round(saturated_fraction, 4),
+                ),
+            )
 
 
 if __name__ == "__main__":
+    logger.info('"event": "script_start"')
     main()
