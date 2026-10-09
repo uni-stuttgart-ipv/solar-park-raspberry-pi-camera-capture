@@ -416,22 +416,6 @@ def acquire_image(camera_device: CameraDevice, hotpixel_correction: ipl.Hotpixel
     data_stream = camera_device.data_stream
 
     try:
-        data_stream.Flush(peak.DataStreamFlushMode_DiscardAll)
-    except Exception as e:
-        log_data(logging.ERROR, CAMERA_ID, dict(event="buffer_flush_error", error=str(e)))
-        return None
-
-    try:
-        announced = list(data_stream.AnnouncedBuffers())
-    except Exception as e:
-        log_data(logging.ERROR, CAMERA_ID, dict(event="buffer_list_error", error=str(e)))
-        return None
-
-    for announced_buffer in announced:
-        if not queue_buffer(data_stream, announced_buffer):
-            return None
-
-    try:
         buffer = data_stream.WaitForFinishedBuffer(5000)
     except Exception as e:
         log_data(logging.ERROR, CAMERA_ID, dict(event="buffer_wait_error", error=str(e)))
