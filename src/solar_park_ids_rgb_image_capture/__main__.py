@@ -25,12 +25,12 @@ CAMERA_BRIGHTNESS_MIN = 15
 CAMERA_BRIGHTNESS_MAX = 240
 CAMERA_MAX_SATURATED_FRACTION = 0.15
 # Minimum time between stored images.
-CAMERA_CAPTURE_FREQUENCY_SEC = 5 * 60
+CAMERA_CAPTURE_FREQUENCY_SEC = 1 * 60
 # Maximum time between stored images.
-CAMERA_MAX_TIME_BETWEEN_CAPTURES_SEC = 10 * 60
+CAMERA_MAX_TIME_BETWEEN_CAPTURES_SEC = 2 * 60
 
 # Time between iterations of the main loop.
-MAIN_LOOP_SLEEP_SEC = 1 * 60
+MAIN_LOOP_SLEEP_SEC = 10
 
 CAMERA_NODE_SETTINGS: list[tuple[str, str | bool | int | float]] = [
     ("ExposureAuto", "Continuous"),
