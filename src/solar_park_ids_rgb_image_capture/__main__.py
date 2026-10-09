@@ -467,15 +467,16 @@ def process_capture(camera: Camera, camera_device: CameraDevice, hotpixel_correc
         )
         return False
 
-    with tempfile.NamedTemporaryFile(suffix=".jpg", delete_on_close=False) as f:
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        path = os.path.join(tmp_dir, "image.jpg")
         try:
-            ipl.ImageWriter.Write(f.name, image_rgb)
+            ipl.ImageWriter.Write(path, image_rgb)
         except Exception as e:
-            log_data(logging.ERROR, camera.id, dict(event="image_write_error", path=f.name, error=str(e)))
+            log_data(logging.ERROR, camera.id, dict(event="image_write_error", path=path, error=str(e)))
             return False
-        log_data(logging.INFO, camera.id, dict(event="image_saved_local", path=f.name))
+        log_data(logging.INFO, camera.id, dict(event="image_saved_local", path=path))
 
-        s3_object_key = store.store_image_in_s3(f.name, timestamp, camera.id)
+        s3_object_key = store.store_image_in_s3(path, timestamp, camera.id)
 
     if s3_object_key is None:
         log_data(logging.ERROR, camera.id, dict(event="storage_failure"))
