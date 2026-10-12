@@ -22,7 +22,7 @@ INFLUXDB_CAMERA_FILE_PATH_FIELD_NAME = "s3_object_key"
 
 logger = logging.getLogger(__name__)
 
-def log_data(level: int, data: dict) -> None:
+def log_data(level: int, data: dict):
     msg_data = []
     for key, value in data.items():
         msg_data.append(f'"{key}": "{value}"')
@@ -30,15 +30,23 @@ def log_data(level: int, data: dict) -> None:
     msg = ", ".join(msg_data)
     logger.log(level, msg)
 
-
 def get_required_env(key: str) -> str:
     value = os.getenv(key)
     if value is None:
         raise RuntimeError(f"environment variable {key} is not set")
     return value
 
-
 def store_image_in_s3(local_path: str, timestamp: dt.datetime, camera_id: str) -> str | None:
+    """Upload image from local temp dir to s3 bucket
+
+    Args:
+        local_path (str): path to the img.
+        timestamp (dt.datetime): timestamp of the img.
+        camera_id (str): id of the camera. 
+
+    Returns:
+        str | None: obj key of the uploaded image file | if an error occured.
+    """
     access_key_id = get_required_env(AWS_ACCESS_KEY_ID_ENV_KEY)
     secret_access_key = get_required_env(AWS_SECRET_ACCESS_KEY_ENV_KEY)
     bucket = get_required_env(S3_BUCKET_NAME_ENV_KEY)
@@ -51,62 +59,43 @@ def store_image_in_s3(local_path: str, timestamp: dt.datetime, camera_id: str) -
     object_key = posixpath.join(prefix, camera_id, filename)
  
     try:
-        s3.upload_file(
-            local_path,
-            bucket,
-            object_key,
-            ExtraArgs={"ContentType": "image/jpeg"},
-            )
+        s3.upload_file(local_path, bucket, object_key, ExtraArgs={"ContentType": "image/jpeg"})
     except EndpointConnectionError as e:
-        log_data(logging.ERROR, dict(event="s3_storage_failure", error=e))
+        log_data(logging.ERROR, dict(event="s3_netowrk_failure", error=e))
         return None
     except ClientError as e:
-        log_data(logging.ERROR, dict(event="s3_storage_failure", error=e))
+        log_data(logging.ERROR, dict(event="s3_client_error", error=e))
         return None
     except Exception as e:
-        log_data(logging.ERROR, dict(event="s3_storage_failure", error=e))
+        log_data(logging.ERROR, dict(event="s3_unexpected_failure", error=e))
         return None
 
     return object_key
 
-
-def influx_success(self, data: bytes) -> None:
+def influx_success(self, data: bytes):
     data_str = data.decode()
     data_str = data_str.replace('"', '\\"')
     log_data(logging.INFO, dict(event="influxdb_registration_success", data=data_str))
 
-
-def influx_error(self, data: str, exception: InfluxDBError) -> None:
+def influx_error(self, data: str, exception: InfluxDBError):
     """Log influx write error.
 
     Args:
         data (str): Data trying to be written.
         exception (influx.InfluxDBError): Error that ocurred.
     """
-    log_data(
-        logging.ERROR,
-        dict(event="influxdb_write_failure", config=self, data=data, cause=exception),
-    )
+    log_data(logging.ERROR, dict(event="influxdb_write_failure", config=self, data=data, cause=exception))
 
 def influx_retry(self, data: str, exception: InfluxDBError) -> None:
-    log_data(
-        logging.DEBUG,
-        dict(event="influxdb_retry", config=self, data=data, cause=exception),
-    )
+    log_data(logging.DEBUG, dict(event="influxdb_retry", config=self, data=data, cause=exception),)
 
-def register_image_in_influxdb(timestamp: dt.datetime, s3_object_key: str, camera_id: str) -> bool:
-    """Add a reference to an image file to the InfluxDB.
+def register_image_in_influxdb(timestamp: dt.datetime, s3_object_key: str, camera_id: str):
+    """Add a reference to a spectral data file to the InfluxDB.
 
     Args:
-        timestamp (dt.datetime): Timestamp associated with the capture.
-        s3_object_key (str): S3 object key (object path) to the image file.
-        camera_id (str): Name of the camera.
-
-    Returns:
-        bool: `True` if the point was written without errors.
-
-    Raises:
-        RuntimeError: Required environment variables are not set.
+        timestamp (dt.datetime): Timestamp associated to the img.
+        s3_object_key (str): S3 object key to the img.
+        camera_id (str): Id of the camera.
     """
     s3_bucket = get_required_env(S3_BUCKET_NAME_ENV_KEY)
     access_token = get_required_env(INFLUXDB_TOKEN_ENV_KEY)
@@ -135,15 +124,10 @@ def register_image_in_influxdb(timestamp: dt.datetime, s3_object_key: str, camer
         write_options=write_options,
     )
 
-    try:
-        with influx.InfluxDBClient3(
-            host=INFLUXDB_HOST,
-            token=access_token,
-            database=INFLUXDB_DATABASE,
-            write_client_options=options,
-        ) as client:
-            client.write(point)
-    except Exception as e:
-        log_data(logging.ERROR, dict(event="influxdb_write_failure", cause=e))
-        return False
-    return True
+    with influx.InfluxDBClient3(
+        host=INFLUXDB_HOST,
+        token=access_token,
+        database=INFLUXDB_DATABASE,
+        write_client_options=options,
+    ) as client:
+        client.write(point)
