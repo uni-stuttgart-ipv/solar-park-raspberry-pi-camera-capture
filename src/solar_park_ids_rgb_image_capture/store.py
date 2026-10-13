@@ -90,7 +90,7 @@ def influx_retry(self, data: str, exception: InfluxDBError) -> None:
     log_data(logging.DEBUG, dict(event="influxdb_retry", config=self, data=data, cause=exception),)
 
 def register_image_in_influxdb(timestamp: dt.datetime, s3_object_key: str, camera_id: str):
-    """Add a reference to a spectral data file to the InfluxDB.
+    """Add a reference to a img file to the InfluxDB.
 
     Args:
         timestamp (dt.datetime): Timestamp associated to the img.
