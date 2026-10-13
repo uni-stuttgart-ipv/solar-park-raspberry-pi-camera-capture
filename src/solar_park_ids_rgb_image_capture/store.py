@@ -6,6 +6,7 @@ import boto3
 from botocore.exceptions import ClientError, EndpointConnectionError
 import influxdb_client_3 as influx
 from influxdb_client_3.exceptions.exceptions import InfluxDBError
+from . import notify
 
 S3_BUCKET_NAME_ENV_KEY = "S3_BUCKET_NAME"
 S3_PREFIX_ENV_KEY = "S3_PREFIX"
@@ -62,14 +63,35 @@ def store_image_in_s3(local_path: str, timestamp: dt.datetime, camera_id: str) -
         s3.upload_file(local_path, bucket, object_key, ExtraArgs={"ContentType": "image/jpeg"})
     except EndpointConnectionError as e:
         log_data(logging.ERROR, dict(event="s3_netowrk_failure", error=e))
+        notify_credentials = notify.get_credentials()
+        if notify_credentials is not None:
+            msg = f"Could not connect to AWS S3.\n\n{e}\n\nCheck logs for more details."
+            try:
+                notify.send_error_email(notify_credentials, msg)
+            except Exception as e:
+                log_data(logging.ERROR, dict(event="notification_failed", error=e))
         return None
     except ClientError as e:
         log_data(logging.ERROR, dict(event="s3_client_error", error=e))
-        return None
+        notify_credentials = notify.get_credentials() 
+        if notify_credentials is not None: 
+            msg = f"Failed writing data to AWS S3.\n\n{e}\n\nCheck logs for more details." 
+            try: 
+                notify.send_error_email(notify_credentials, msg) 
+            except Exception as e: 
+                log_data(logging.ERROR, dict(event="notification_failed", error=e)) 
+        return None 
+
     except Exception as e:
         log_data(logging.ERROR, dict(event="s3_unexpected_failure", error=e))
-        return None
-
+        notify_credentials = notify.get_credentials() 
+        if notify_credentials is not None: 
+            msg = f"An unhandled error ocurred.\n\n{e}\n\nCheck logs for more details." 
+            try: 
+                notify.send_error_email(notify_credentials, msg) 
+            except Exception as e: 
+                log_data(logging.ERROR, dict(event="notification_failed", error=e)) 
+        return None 
     return object_key
 
 def influx_success(self, data: bytes):
