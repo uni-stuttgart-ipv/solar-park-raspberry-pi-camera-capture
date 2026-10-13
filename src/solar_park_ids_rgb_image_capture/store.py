@@ -107,6 +107,13 @@ def influx_error(self, data: str, exception: InfluxDBError):
         exception (influx.InfluxDBError): Error that ocurred.
     """
     log_data(logging.ERROR, dict(event="influxdb_write_failure", config=self, data=data, cause=exception))
+    notify_credentials = notify.get_credentials() 
+    if notify_credentials is not None: 
+        msg = f"Failed writing data to InfluxDB.\n\n{data}\n{exception}\n\nCheck logs for more details." 
+        try: 
+            notify.send_error_email(notify_credentials, msg) 
+        except Exception as e: 
+            log_data(logging.ERROR, dict(event="notification_failed", error=e))
 
 def influx_retry(self, data: str, exception: InfluxDBError) -> None:
     log_data(logging.DEBUG, dict(event="influxdb_retry", config=self, data=data, cause=exception),)
