@@ -56,66 +56,6 @@ MEASUREMENT_CONFIG = MeasurementConfig(
     CAMERA_MAX_CAPTURE_INTERVAL_SEC,
 )
 
-def is_capture_due(time: dt.datetime, last_stored_time: dt.datetime | None, config: MeasurementConfig) -> bool:
-    if last_stored_time is None:
-        return True
-
-    elapsed = time - last_stored_time
-    return elapsed.total_seconds() >= config.min_capture_interval_sec
-
-def is_capture_overdue(time: dt.datetime, last_stored_time: dt.datetime | None, config: MeasurementConfig) -> bool:
-    if last_stored_time is None:
-        return False
-
-    elapsed = time - last_stored_time
-    overdue = elapsed.total_seconds() >= config.max_capture_interval_sec
-    log_data(
-        logging.DEBUG,
-        CAMERA_ID,
-        dict(event="capture_validation", property="max_capture_interval_sec", value=overdue),
-        )
-    return overdue
-
-def is_bright_enough(mean_intensity: float, config: MeasurementConfig) -> bool:
-    passed = mean_intensity >= config.brightness_min
-    log_data(
-        logging.DEBUG,
-        CAMERA_ID,
-        dict(event="capture_validation", property="is_bright_enough", value=passed),
-        )
-    return passed
-
-def is_not_overexposed(mean_intensity: float, config: MeasurementConfig) -> bool:
-    passed = mean_intensity <= config.brightness_max
-    log_data(
-        logging.DEBUG,
-        CAMERA_ID,
-        dict(event="capture_validation", property="is_not_overexposed", value=passed),
-        )
-    return passed
-
-def is_not_saturated(saturated_fraction: float, config: MeasurementConfig) -> bool:
-    passed = saturated_fraction <= config.max_saturated_fraction
-    log_data(
-        logging.DEBUG,
-        CAMERA_ID,
-        dict(event="capture_validation", property="is_not_saturated", value=passed),
-        )
-    return passed
-
-def image_should_be_stored(time: dt.datetime, last_stored_time: dt.datetime | None, mean_intensity: float, saturated_fraction: float, config: MeasurementConfig) -> bool:
-    # Once the maximum period has passed, store the image regardless of exposure.
-    if is_capture_overdue(time, last_stored_time, config):
-        return True
-    if not is_bright_enough(mean_intensity, config):
-        return False
-    if not is_not_overexposed(mean_intensity, config):
-        return False
-    if not is_not_saturated(saturated_fraction, config):
-        return False
-
-    return True
-
 def set_log_level():
     """Set the log level from the environment variable."""
     log_level = os.getenv(LOG_LEVEL_ENV_KEY)
@@ -128,6 +68,41 @@ def set_log_level():
         return
 
     logger.setLevel(level)
+    
+def should_skip_image(time: dt.datetime, last_stored_time: dt.datetime | None, mean_intensity: float, saturated_fraction: float, config: MeasurementConfig) -> bool:
+    if last_stored_time is not None:
+        elapsed = time - last_stored_time
+        overdue = elapsed.total_seconds() >= config.max_capture_interval_sec
+        log_data(
+            logging.DEBUG,
+            CAMERA_ID,
+            dict(event="capture_validation", property="max_capture_interval_sec", value=overdue),
+        )
+        if overdue:
+            return False
+
+    too_dark = mean_intensity < config.brightness_min
+    log_data(
+        logging.DEBUG,
+        CAMERA_ID,
+        dict(event="capture_validation", property="too_dark", value=too_dark),
+    )
+
+    too_bright = mean_intensity > config.brightness_max
+    log_data(
+        logging.DEBUG,
+        CAMERA_ID,
+        dict(event="capture_validation", property="too_bright", value=too_bright),
+    )
+
+    too_saturated = saturated_fraction > config.max_saturated_fraction
+    log_data(
+        logging.DEBUG,
+        CAMERA_ID,
+        dict(event="capture_validation", property="too_saturated", value=too_saturated),
+    )
+
+    return too_dark or too_bright or too_saturated
 
 def buffer_to_rgb_image(buffer: peak.Buffer, hotpixel_correction: ipl.HotpixelCorrection) -> ipl.Image:
     try:
@@ -180,6 +155,10 @@ def measure_exposure(image_rgb: ipl.Image) -> tuple[float, float]:
     try:
         width = image_rgb.Width()
         height = image_rgb.Height()
+    except Exception as e:
+        raise RuntimeError(f"image size read failed: {e}") from e
+
+    try:
         arr = image_rgb.get_numpy_1D().reshape((height, width, 4))
     except Exception as e:
         raise RuntimeError(f"image to numpy failed: {e}") from e
@@ -204,14 +183,18 @@ def main():
     hotpixel_correction = ipl.HotpixelCorrection()
     last_stored_time: dt.datetime | None = None
 
+    #TODO: Add counter for number capture failures and stop the script if it exceeds a threshold. 
+    
     while True:
         set_log_level()
         time.sleep(MAIN_LOOP_SLEEP_SEC)
 
         now = dt.datetime.now()
-        if not is_capture_due(now, last_stored_time, MEASUREMENT_CONFIG):
-            continue
-
+        if last_stored_time is not None:        
+            elapsed = now - last_stored_time
+            if elapsed.total_seconds() < MEASUREMENT_CONFIG.min_capture_interval_sec:
+                continue
+        
         try:
             image_rgb = acquire_image(camera_device, hotpixel_correction)
             mean_intensity, saturated_fraction = measure_exposure(image_rgb)
@@ -219,7 +202,7 @@ def main():
             log_data(logging.ERROR, CAMERA_ID, dict(event="capture_failure", error=str(e)))
             continue
 
-        if not image_should_be_stored(now, last_stored_time, mean_intensity, saturated_fraction, MEASUREMENT_CONFIG):
+        if should_skip_image(now, last_stored_time, mean_intensity, saturated_fraction, MEASUREMENT_CONFIG):
             log_data(
                 logging.INFO,
                 CAMERA_ID,
@@ -227,7 +210,7 @@ def main():
                 )
             continue
 
-        with tempfile.TemporaryDirectory(suffix=".jpg") as f:
+        with tempfile.NamedTemporaryFile(suffix=".jpg") as f:
             try:
                 ipl.ImageWriter.Write(f.name, image_rgb)
             except Exception as e:

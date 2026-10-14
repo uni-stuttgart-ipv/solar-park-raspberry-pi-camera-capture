@@ -62,7 +62,7 @@ def store_image_in_s3(local_path: str, timestamp: dt.datetime, camera_id: str) -
     try:
         s3.upload_file(local_path, bucket, object_key, ExtraArgs={"ContentType": "image/jpeg"})
     except EndpointConnectionError as e:
-        log_data(logging.ERROR, dict(event="s3_netowrk_failure", error=e))
+        log_data(logging.ERROR, dict(event="s3_network_failure", error=e))
         notify_credentials = notify.get_credentials()
         if notify_credentials is not None:
             msg = f"Could not connect to AWS S3.\n\n{e}\n\nCheck logs for more details."
