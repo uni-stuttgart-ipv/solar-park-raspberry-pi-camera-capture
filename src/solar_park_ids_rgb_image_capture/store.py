@@ -65,7 +65,7 @@ def store_image_in_s3(local_path: str, timestamp: dt.datetime, camera_id: str) -
         log_data(logging.ERROR, dict(event="s3_network_failure", error=e))
         notify_credentials = notify.get_credentials()
         if notify_credentials is not None:
-            msg = f"Could not connect to AWS S3.\n\n{e}\n\nCheck logs for more details."
+            msg = f"[RGBCAM] Could not connect to AWS S3.\n\n{e}\n\nCheck logs for more details."
             try:
                 notify.send_error_email(notify_credentials, msg)
             except Exception as e:
@@ -75,7 +75,7 @@ def store_image_in_s3(local_path: str, timestamp: dt.datetime, camera_id: str) -
         log_data(logging.ERROR, dict(event="s3_client_error", error=e))
         notify_credentials = notify.get_credentials() 
         if notify_credentials is not None: 
-            msg = f"Failed writing data to AWS S3.\n\n{e}\n\nCheck logs for more details." 
+            msg = f"[RGBCAM] Failed writing data to AWS S3.\n\n{e}\n\nCheck logs for more details." 
             try: 
                 notify.send_error_email(notify_credentials, msg) 
             except Exception as e: 
@@ -86,7 +86,7 @@ def store_image_in_s3(local_path: str, timestamp: dt.datetime, camera_id: str) -
         log_data(logging.ERROR, dict(event="s3_unexpected_failure", error=e))
         notify_credentials = notify.get_credentials() 
         if notify_credentials is not None: 
-            msg = f"An unhandled error ocurred.\n\n{e}\n\nCheck logs for more details." 
+            msg = f"[RGBCAM] An unhandled error ocurred.\n\n{e}\n\nCheck logs for more details." 
             try: 
                 notify.send_error_email(notify_credentials, msg) 
             except Exception as e: 
@@ -109,7 +109,7 @@ def influx_error(self, data: str, exception: InfluxDBError):
     log_data(logging.ERROR, dict(event="influxdb_write_failure", config=self, data=data, cause=exception))
     notify_credentials = notify.get_credentials() 
     if notify_credentials is not None: 
-        msg = f"Failed writing data to InfluxDB.\n\n{data}\n{exception}\n\nCheck logs for more details." 
+        msg = f"[RGBCAM] Failed writing data to InfluxDB.\n\n{data}\n{exception}\n\nCheck logs for more details." 
         try: 
             notify.send_error_email(notify_credentials, msg) 
         except Exception as e: 
