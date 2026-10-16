@@ -1,3 +1,4 @@
+#test
 import os
 import time
 import logging
@@ -27,9 +28,9 @@ CAMERA_BRIGHTNESS_MAX = 240
 CAMERA_MAX_SATURATED_FRACTION = 0.15
 
 # Minimum time between stored images.
-CAMERA_MIN_CAPTURE_INTERVAL_SEC = 1 * 60
+CAMERA_MIN_CAPTURE_INTERVAL_SEC = 30 * 60
 # Maximum time between stored images.
-CAMERA_MAX_CAPTURE_INTERVAL_SEC = 2 * 60
+CAMERA_MAX_CAPTURE_INTERVAL_SEC = 40 * 60
 
 # Time between iterations of the main loop.
 MAIN_LOOP_SLEEP_SEC = 10
@@ -131,6 +132,22 @@ def buffer_to_rgb_image(buffer: peak.Buffer, hotpixel_correction: ipl.HotpixelCo
     except Exception as e:
         raise RuntimeError(f"image convert failed: {e}") from e
 
+def discard_stale_frames(camera_device: CameraDevice) -> None:
+    data_stream = camera_device.data_stream
+
+    try:
+        num_buffers = len(list(data_stream.AnnouncedBuffers()))
+    except Exception as e:
+        raise RuntimeError(f"buffer list failed: {e}") from e
+
+    for _ in range(num_buffers):
+        try:
+            buffer = data_stream.WaitForFinishedBuffer(5000)
+        except Exception as e:
+            raise RuntimeError(f"stale buffer wait failed: {e}") from e
+
+        queue_buffer(data_stream, buffer)
+
 def acquire_image(camera_device: CameraDevice, hotpixel_correction: ipl.HotpixelCorrection) -> ipl.Image:
     data_stream = camera_device.data_stream
 
@@ -184,7 +201,7 @@ def main():
     last_stored_time: dt.datetime | None = None
 
     #TODO: Add counter for number capture failures and stop the script if it exceeds a threshold. 
-    
+
     while True:
         set_log_level()
         time.sleep(MAIN_LOOP_SLEEP_SEC)
@@ -196,6 +213,7 @@ def main():
                 continue
         
         try:
+            discard_stale_frames(camera_device)
             image_rgb = acquire_image(camera_device, hotpixel_correction)
             mean_intensity, saturated_fraction = measure_exposure(image_rgb)
         except RuntimeError as e:
