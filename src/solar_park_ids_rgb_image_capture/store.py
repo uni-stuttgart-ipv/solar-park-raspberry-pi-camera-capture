@@ -23,6 +23,9 @@ INFLUXDB_CAMERA_FILE_PATH_FIELD_NAME = "s3_object_key"
 
 logger = logging.getLogger(__name__)
 
+email_s3upload = False
+email_influxupdate = False
+
 def log_data(level: int, data: dict):
     msg_data = []
     for key, value in data.items():
@@ -48,6 +51,7 @@ def store_image_in_s3(local_path: str, timestamp: dt.datetime, camera_id: str) -
     Returns:
         str | None: obj key of the uploaded image file | if an error occured.
     """
+    global email_s3upload
     access_key_id = get_required_env(AWS_ACCESS_KEY_ID_ENV_KEY)
     secret_access_key = get_required_env(AWS_SECRET_ACCESS_KEY_ENV_KEY)
     bucket = get_required_env(S3_BUCKET_NAME_ENV_KEY)
@@ -63,32 +67,43 @@ def store_image_in_s3(local_path: str, timestamp: dt.datetime, camera_id: str) -
         s3.upload_file(local_path, bucket, object_key, ExtraArgs={"ContentType": "image/jpeg"})
     except EndpointConnectionError as e:
         log_data(logging.ERROR, dict(event="s3_network_failure", error=e))
+        if email_s3upload:
+            log_data(logging.INFO, dict(event="notification_skipped", reason="email already sent"))
+            return None
         notify_credentials = notify.get_credentials()
         if notify_credentials is not None:
             msg = f"[RGBCAM] Could not connect to AWS S3.\n\n{e}\n\nCheck logs for more details."
             try:
                 notify.send_error_email(notify_credentials, msg)
+                email_s3upload = True
             except Exception as e:
                 log_data(logging.ERROR, dict(event="notification_failed", error=e))
         return None
     except ClientError as e:
         log_data(logging.ERROR, dict(event="s3_client_error", error=e))
+        if email_s3upload:
+            log_data(logging.INFO, dict(event="notification_skipped", reason="email already sent"))
+            return None
         notify_credentials = notify.get_credentials() 
         if notify_credentials is not None: 
             msg = f"[RGBCAM] Failed writing data to AWS S3.\n\n{e}\n\nCheck logs for more details." 
             try: 
                 notify.send_error_email(notify_credentials, msg) 
+                email_s3upload = True
             except Exception as e: 
                 log_data(logging.ERROR, dict(event="notification_failed", error=e)) 
-        return None 
-
+        return None
     except Exception as e:
         log_data(logging.ERROR, dict(event="s3_unexpected_failure", error=e))
+        if email_s3upload:
+            log_data(logging.INFO, dict(event="notification_skipped", reason="email already sent"))
+            return None
         notify_credentials = notify.get_credentials() 
         if notify_credentials is not None: 
             msg = f"[RGBCAM] An unhandled error ocurred.\n\n{e}\n\nCheck logs for more details." 
             try: 
                 notify.send_error_email(notify_credentials, msg) 
+                email_s3upload = True
             except Exception as e: 
                 log_data(logging.ERROR, dict(event="notification_failed", error=e)) 
         return None 
@@ -106,12 +121,19 @@ def influx_error(self, data: str, exception: InfluxDBError):
         data (str): Data trying to be written.
         exception (influx.InfluxDBError): Error that ocurred.
     """
+    global email_influxupdate
     log_data(logging.ERROR, dict(event="influxdb_write_failure", config=self, data=data, cause=exception))
+
+    if email_influxupdate:
+        log_data(logging.INFO, dict(event="notification_skipped", reason="email already sent"))
+        return
+
     notify_credentials = notify.get_credentials() 
     if notify_credentials is not None: 
         msg = f"[RGBCAM] Failed writing data to InfluxDB.\n\n{data}\n{exception}\n\nCheck logs for more details." 
         try: 
             notify.send_error_email(notify_credentials, msg) 
+            email_influxupdate = True
         except Exception as e: 
             log_data(logging.ERROR, dict(event="notification_failed", error=e))
 

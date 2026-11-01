@@ -1,5 +1,5 @@
-#test
 import os
+import sys
 import time
 import logging
 import tempfile
@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 from ids_peak import ids_peak as peak
 from ids_peak_ipl import ids_peak_ipl as ipl
-from . import store, LOG_LEVEL_ENV_KEY, LOG_LEVEL_DEFAULT
+from . import store, notify, LOG_LEVEL_ENV_KEY, LOG_LEVEL_DEFAULT
 from .camera_setup import CameraDevice, queue_buffer, setup_camera
 
 LOG_FILE = "ipv_solar_park_rgb_camera_data_pipeline.log"
@@ -71,6 +71,15 @@ def set_log_level():
     logger.setLevel(level)
     
 def should_skip_image(time: dt.datetime, last_stored_time: dt.datetime | None, mean_intensity: float, saturated_fraction: float, config: MeasurementConfig) -> bool:
+    too_dark = mean_intensity < config.brightness_min
+    log_data(
+        logging.DEBUG,
+        CAMERA_ID,
+        dict(event="capture_validation", property="too_dark", value=too_dark),
+    )
+    if too_dark:
+        return True
+
     if last_stored_time is not None:
         elapsed = time - last_stored_time
         overdue = elapsed.total_seconds() >= config.max_capture_interval_sec
@@ -81,13 +90,6 @@ def should_skip_image(time: dt.datetime, last_stored_time: dt.datetime | None, m
         )
         if overdue:
             return False
-
-    too_dark = mean_intensity < config.brightness_min
-    log_data(
-        logging.DEBUG,
-        CAMERA_ID,
-        dict(event="capture_validation", property="too_dark", value=too_dark),
-    )
 
     too_bright = mean_intensity > config.brightness_max
     log_data(
@@ -103,7 +105,7 @@ def should_skip_image(time: dt.datetime, last_stored_time: dt.datetime | None, m
         dict(event="capture_validation", property="too_saturated", value=too_saturated),
     )
 
-    return too_dark or too_bright or too_saturated
+    return too_bright or too_saturated
 
 def buffer_to_rgb_image(buffer: peak.Buffer, hotpixel_correction: ipl.HotpixelCorrection) -> ipl.Image:
     try:
@@ -200,8 +202,6 @@ def main():
     hotpixel_correction = ipl.HotpixelCorrection()
     last_stored_time: dt.datetime | None = None
 
-    #TODO: Add counter for number capture failures and stop the script if it exceeds a threshold. 
-
     while True:
         set_log_level()
         time.sleep(MAIN_LOOP_SLEEP_SEC)
@@ -211,14 +211,25 @@ def main():
             elapsed = now - last_stored_time
             if elapsed.total_seconds() < MEASUREMENT_CONFIG.min_capture_interval_sec:
                 continue
-        
-        try:
-            discard_stale_frames(camera_device)
-            image_rgb = acquire_image(camera_device, hotpixel_correction)
-            mean_intensity, saturated_fraction = measure_exposure(image_rgb)
-        except RuntimeError as e:
-            log_data(logging.ERROR, CAMERA_ID, dict(event="capture_failure", error=str(e)))
-            continue
+
+        for _ in range(3):
+            try:
+                discard_stale_frames(camera_device)
+                image_rgb = acquire_image(camera_device, hotpixel_correction)
+                mean_intensity, saturated_fraction = measure_exposure(image_rgb)
+                break
+            except RuntimeError as e:
+                log_data(logging.ERROR, CAMERA_ID, dict(event="capture_failure", error=str(e)))
+        else:
+            log_data(logging.CRITICAL, CAMERA_ID, dict(event="capture_failed_now_exiting", attempts=3))
+            credentials = notify.get_credentials()
+            if credentials is not None:
+                msg = "[RGBCAM] Image capture failed 3 times in a row. The script has stopped.\n\nCheck the camera, then restart the script."
+                try:
+                    notify.send_error_email(credentials, msg)
+                except Exception as notify_err:
+                    log_data(logging.ERROR, CAMERA_ID, dict(event="notification_failed", error=str(notify_err)))
+            sys.exit(1)
 
         if should_skip_image(now, last_stored_time, mean_intensity, saturated_fraction, MEASUREMENT_CONFIG):
             log_data(

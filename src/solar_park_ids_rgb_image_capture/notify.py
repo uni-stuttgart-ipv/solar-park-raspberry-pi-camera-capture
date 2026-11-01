@@ -33,8 +33,8 @@ def send_error_email(credentials: EmailCredentials, content: str):
     """
     msg = EmailMessage()
     msg["From"] = credentials.email
-    msg["To"] = credentials.email
-    msg["Subject"] = "Solar Park Error"
+    msg["To"] = credentials.email  #add email here for the person who should receive the error notification : "email@example.com" 
+    msg["Subject"] = "Solar Park RGB CAM Error"
     msg.set_content(content)
 
     with smtplib.SMTP(SMTP_SERVER, port=587) as server:
