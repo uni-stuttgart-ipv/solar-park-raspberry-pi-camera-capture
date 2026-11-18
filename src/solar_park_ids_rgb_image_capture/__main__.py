@@ -267,6 +267,7 @@ def main():
     hotpixel_correction = ipl.HotpixelCorrection()
     last_stored_time: dt.datetime | None = None
     prev_img = None
+    relative_change = None
     while True:
         set_log_level()
         time.sleep(MAIN_LOOP_SLEEP_SEC)
