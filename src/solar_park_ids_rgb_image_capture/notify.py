@@ -1,4 +1,3 @@
-from typing import Optional
 import os
 import smtplib
 import ssl
@@ -33,7 +32,9 @@ def send_error_email(credentials: EmailCredentials, content: str):
     """
     msg = EmailMessage()
     msg["From"] = credentials.email
-    msg["To"] = credentials.email  #add email here for the person who should receive the error notification : "email@example.com" 
+    msg["To"] = (
+        credentials.email
+    )  # add email here for the person who should receive the error notification : "email@example.com"
     msg["Subject"] = "Solar Park RGB CAM Error"
     msg.set_content(content)
 
@@ -44,7 +45,7 @@ def send_error_email(credentials: EmailCredentials, content: str):
         server.send_message(msg)
 
 
-def get_credentials() -> Optional[EmailCredentials]:
+def get_credentials() -> EmailCredentials | None:
     email = os.getenv(EMAIL_ENV_KEY)
     username = os.getenv(USERNAME_ENV_KEY)
     password = os.getenv(PASSWORD_ENV_KEY)

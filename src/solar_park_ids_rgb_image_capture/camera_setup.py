@@ -15,14 +15,16 @@ CAMERA_NODE_SETTINGS: dict[str, str | bool | int | float] = {
     "BrightnessAutoTarget": 150,
     "ComponentSelector": "Intensity",
     "PixelFormat": "BayerRG8",
-    "BlackLevel": 0.31
-    }
+    "BlackLevel": 0.31,
+}
+
 
 @dataclass
 class CameraDevice:
     device: peak.Device
     data_stream: peak.DataStream
     node_map: peak.NodeMap
+
 
 def open_camera() -> CameraDevice:
     """Find and open the camera, its remote node map and its data stream.
@@ -92,13 +94,15 @@ def open_camera() -> CameraDevice:
 
     return CameraDevice(device, data_stream, node_map)
 
+
 def find_node(node_map: peak.NodeMap, name: str) -> peak.Node:
     try:
         return node_map.FindNode(name)
     except Exception as e:
         raise RuntimeError(f"node {name} not found: {e}") from e
 
-def set_node(node_map: peak.NodeMap, name: str, value: str | bool | int | float):
+
+def set_node(node_map: peak.NodeMap, name: str, value: str | bool | float):
     node = find_node(node_map, name)
     try:
         if isinstance(value, str):
@@ -107,6 +111,7 @@ def set_node(node_map: peak.NodeMap, name: str, value: str | bool | int | float)
             node.SetValue(value)
     except Exception as e:
         raise RuntimeError(f"could not set node {name} to {value}: {e}") from e
+
 
 def configure_camera(camera_device: CameraDevice):
     node_map = camera_device.node_map
@@ -119,7 +124,7 @@ def configure_camera(camera_device: CameraDevice):
     except Exception as e:
         raise RuntimeError(f"could not read sensor size: {e}") from e
 
-    roi = dict(OffsetX=0, OffsetY=0, Width=width, Height=height)
+    roi = {"OffsetX": 0, "OffsetY": 0, "Width": width, "Height": height}
     for name, value in roi.items():
         set_node(node_map, name, value)
 
@@ -133,11 +138,13 @@ def configure_camera(camera_device: CameraDevice):
     if failures:
         raise RuntimeError("; ".join(failures))
 
+
 def queue_buffer(data_stream: peak.DataStream, buffer: peak.Buffer):
     try:
         data_stream.QueueBuffer(buffer)
     except Exception as e:
         raise RuntimeError(f"buffer queue failed: {e}") from e
+
 
 def alloc_and_announce_buffers(camera_device: CameraDevice):
     data_stream = camera_device.data_stream
@@ -178,9 +185,12 @@ def alloc_and_announce_buffers(camera_device: CameraDevice):
 
         queue_buffer(data_stream, buffer)
 
+
 def start_acquisition(camera_device: CameraDevice):
     try:
-        camera_device.data_stream.StartAcquisition(peak.AcquisitionStartMode_Default, peak.DataStream.INFINITE_NUMBER)
+        camera_device.data_stream.StartAcquisition(
+            peak.AcquisitionStartMode_Default, peak.DataStream.INFINITE_NUMBER
+        )
     except Exception as e:
         raise RuntimeError(f"stream acquisition start failed: {e}") from e
 
@@ -191,6 +201,7 @@ def start_acquisition(camera_device: CameraDevice):
         start_node.Execute()
     except Exception as e:
         raise RuntimeError(f"acquisition start failed: {e}") from e
+
 
 def setup_camera() -> CameraDevice:
     camera_device = open_camera()

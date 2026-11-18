@@ -1,11 +1,13 @@
+import datetime as dt
+import logging
 import os
 import posixpath
-import logging
-import datetime as dt
+
 import boto3
-from botocore.exceptions import ClientError, EndpointConnectionError
 import influxdb_client_3 as influx
+from botocore.exceptions import ClientError, EndpointConnectionError
 from influxdb_client_3.exceptions.exceptions import InfluxDBError
+
 from . import notify
 
 S3_BUCKET_NAME_ENV_KEY = "S3_BUCKET_NAME"
@@ -26,6 +28,7 @@ logger = logging.getLogger(__name__)
 email_s3upload = False
 email_influxupdate = False
 
+
 def log_data(level: int, data: dict):
     msg_data = []
     for key, value in data.items():
@@ -34,19 +37,23 @@ def log_data(level: int, data: dict):
     msg = ", ".join(msg_data)
     logger.log(level, msg)
 
+
 def get_required_env(key: str) -> str:
     value = os.getenv(key)
     if value is None:
         raise RuntimeError(f"environment variable {key} is not set")
     return value
 
-def store_image_in_s3(local_path: str, timestamp: dt.datetime, camera_id: str) -> str | None:
+
+def store_image_in_s3(
+    local_path: str, timestamp: dt.datetime, camera_id: str
+) -> str | None:
     """Upload image from local temp dir to s3 bucket
 
     Args:
         local_path (str): path to the img.
         timestamp (dt.datetime): timestamp of the img.
-        camera_id (str): id of the camera. 
+        camera_id (str): id of the camera.
 
     Returns:
         str | None: obj key of the uploaded image file | if an error occured.
@@ -57,18 +64,25 @@ def store_image_in_s3(local_path: str, timestamp: dt.datetime, camera_id: str) -
     bucket = get_required_env(S3_BUCKET_NAME_ENV_KEY)
     prefix = get_required_env(S3_PREFIX_ENV_KEY)
 
-    s3 = boto3.client("s3", aws_access_key_id=access_key_id, aws_secret_access_key=secret_access_key)
+    s3 = boto3.client(
+        "s3", aws_access_key_id=access_key_id, aws_secret_access_key=secret_access_key
+    )
 
     timestamp_str = timestamp.strftime(AWS_DATA_FILE_TIMESTAMP_FORMAT)
     filename = f"{timestamp_str}.jpeg"
     object_key = posixpath.join(prefix, camera_id, filename)
- 
+
     try:
-        s3.upload_file(local_path, bucket, object_key, ExtraArgs={"ContentType": "image/jpeg"})
+        s3.upload_file(
+            local_path, bucket, object_key, ExtraArgs={"ContentType": "image/jpeg"}
+        )
     except EndpointConnectionError as e:
-        log_data(logging.ERROR, dict(event="s3_network_failure", error=e))
+        log_data(logging.ERROR, {"event": "s3_network_failure", "error": e})
         if email_s3upload:
-            log_data(logging.INFO, dict(event="notification_skipped", reason="email already sent"))
+            log_data(
+                logging.INFO,
+                {"event": "notification_skipped", "reason": "email already sent"},
+            )
             return None
         notify_credentials = notify.get_credentials()
         if notify_credentials is not None:
@@ -77,42 +91,50 @@ def store_image_in_s3(local_path: str, timestamp: dt.datetime, camera_id: str) -
                 notify.send_error_email(notify_credentials, msg)
                 email_s3upload = True
             except Exception as e:
-                log_data(logging.ERROR, dict(event="notification_failed", error=e))
+                log_data(logging.ERROR, {"event": "notification_failed", "error": e})
         return None
     except ClientError as e:
-        log_data(logging.ERROR, dict(event="s3_client_error", error=e))
+        log_data(logging.ERROR, {"event": "s3_client_error", "error": e})
         if email_s3upload:
-            log_data(logging.INFO, dict(event="notification_skipped", reason="email already sent"))
+            log_data(
+                logging.INFO,
+                {"event": "notification_skipped", "reason": "email already sent"},
+            )
             return None
-        notify_credentials = notify.get_credentials() 
-        if notify_credentials is not None: 
-            msg = f"[RGBCAM] Failed writing data to AWS S3.\n\n{e}\n\nCheck logs for more details." 
-            try: 
-                notify.send_error_email(notify_credentials, msg) 
+        notify_credentials = notify.get_credentials()
+        if notify_credentials is not None:
+            msg = f"[RGBCAM] Failed writing data to AWS S3.\n\n{e}\n\nCheck logs for more details."
+            try:
+                notify.send_error_email(notify_credentials, msg)
                 email_s3upload = True
-            except Exception as e: 
-                log_data(logging.ERROR, dict(event="notification_failed", error=e)) 
+            except Exception as e:
+                log_data(logging.ERROR, {"event": "notification_failed", "error": e})
         return None
     except Exception as e:
-        log_data(logging.ERROR, dict(event="s3_unexpected_failure", error=e))
+        log_data(logging.ERROR, {"event": "s3_unexpected_failure", "error": e})
         if email_s3upload:
-            log_data(logging.INFO, dict(event="notification_skipped", reason="email already sent"))
+            log_data(
+                logging.INFO,
+                {"event": "notification_skipped", "reason": "email already sent"},
+            )
             return None
-        notify_credentials = notify.get_credentials() 
-        if notify_credentials is not None: 
-            msg = f"[RGBCAM] An unhandled error ocurred.\n\n{e}\n\nCheck logs for more details." 
-            try: 
-                notify.send_error_email(notify_credentials, msg) 
+        notify_credentials = notify.get_credentials()
+        if notify_credentials is not None:
+            msg = f"[RGBCAM] An unhandled error ocurred.\n\n{e}\n\nCheck logs for more details."
+            try:
+                notify.send_error_email(notify_credentials, msg)
                 email_s3upload = True
-            except Exception as e: 
-                log_data(logging.ERROR, dict(event="notification_failed", error=e)) 
-        return None 
+            except Exception as e:
+                log_data(logging.ERROR, {"event": "notification_failed", "error": e})
+        return None
     return object_key
+
 
 def influx_success(self, data: bytes):
     data_str = data.decode()
     data_str = data_str.replace('"', '\\"')
-    log_data(logging.INFO, dict(event="influxdb_registration_success", data=data_str))
+    log_data(logging.INFO, {"event": "influxdb_registration_success", "data": data_str})
+
 
 def influx_error(self, data: str, exception: InfluxDBError):
     """Log influx write error.
@@ -122,25 +144,43 @@ def influx_error(self, data: str, exception: InfluxDBError):
         exception (influx.InfluxDBError): Error that ocurred.
     """
     global email_influxupdate
-    log_data(logging.ERROR, dict(event="influxdb_write_failure", config=self, data=data, cause=exception))
+    log_data(
+        logging.ERROR,
+        {
+            "event": "influxdb_write_failure",
+            "config": self,
+            "data": data,
+            "cause": exception,
+        },
+    )
 
     if email_influxupdate:
-        log_data(logging.INFO, dict(event="notification_skipped", reason="email already sent"))
+        log_data(
+            logging.INFO,
+            {"event": "notification_skipped", "reason": "email already sent"},
+        )
         return
 
-    notify_credentials = notify.get_credentials() 
-    if notify_credentials is not None: 
-        msg = f"[RGBCAM] Failed writing data to InfluxDB.\n\n{data}\n{exception}\n\nCheck logs for more details." 
-        try: 
-            notify.send_error_email(notify_credentials, msg) 
+    notify_credentials = notify.get_credentials()
+    if notify_credentials is not None:
+        msg = f"[RGBCAM] Failed writing data to InfluxDB.\n\n{data}\n{exception}\n\nCheck logs for more details."
+        try:
+            notify.send_error_email(notify_credentials, msg)
             email_influxupdate = True
-        except Exception as e: 
-            log_data(logging.ERROR, dict(event="notification_failed", error=e))
+        except Exception as e:
+            log_data(logging.ERROR, {"event": "notification_failed", "error": e})
+
 
 def influx_retry(self, data: str, exception: InfluxDBError) -> None:
-    log_data(logging.DEBUG, dict(event="influxdb_retry", config=self, data=data, cause=exception),)
+    log_data(
+        logging.DEBUG,
+        {"event": "influxdb_retry", "config": self, "data": data, "cause": exception},
+    )
 
-def register_image_in_influxdb(timestamp: dt.datetime, s3_object_key: str, camera_id: str):
+
+def register_image_in_influxdb(
+    timestamp: dt.datetime, s3_object_key: str, camera_id: str
+):
     """Add a reference to a img file to the InfluxDB.
 
     Args:
@@ -152,7 +192,8 @@ def register_image_in_influxdb(timestamp: dt.datetime, s3_object_key: str, camer
     access_token = get_required_env(INFLUXDB_TOKEN_ENV_KEY)
 
     point = (
-        influx.Point(INFLUXDB_MEASUREMENT_NAME)
+        influx
+        .Point(INFLUXDB_MEASUREMENT_NAME)
         .time(timestamp, write_precision=influx.WritePrecision.S)
         .tag(INFLUXDB_CAMERA_TAG_NAME, camera_id)
         .field(INFLUXDB_CAMERA_BUCKET_FIELD_NAME, s3_bucket)
