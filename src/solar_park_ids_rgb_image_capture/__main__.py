@@ -6,6 +6,7 @@ import tempfile
 import time
 from dataclasses import dataclass
 
+import numpy as np
 from ids_peak import ids_peak as peak
 from ids_peak_ipl import ids_peak_ipl as ipl
 
@@ -26,12 +27,14 @@ CAMERA_ID = "ids_rgb_cam"
 
 CAMERA_BRIGHTNESS_MIN = 15
 CAMERA_BRIGHTNESS_MAX = 240
-CAMERA_MAX_SATURATED_FRACTION = 0.15
+CAMERA_SATURATED_FRACTION_MAX = 0.15
+# Minimum change to trigger dynamic image storage.
+CAMERA_IMAGE_DIFF_THRESHOLD = 0.01
 
 # Minimum time between stored images.
-CAMERA_MIN_CAPTURE_INTERVAL_SEC = 30 * 60
+CAMERA_CAPTURE_INTERVAL_SEC_MIN = 30 * 60
 # Maximum time between stored images.
-CAMERA_MAX_CAPTURE_INTERVAL_SEC = 40 * 60
+CAMERA_CAPTURE_INTERVAL_SEC_MAX = 40 * 60
 
 # Time between iterations of the main loop.
 MAIN_LOOP_SLEEP_SEC = 10
@@ -48,17 +51,19 @@ def log_data(level: int, camera_id: str, data: dict):
 class MeasurementConfig:
     brightness_min: float
     brightness_max: float
-    max_saturated_fraction: float
-    min_capture_interval_sec: int
-    max_capture_interval_sec: int
+    saturated_fraction_threshold: float
+    relative_change_threshold: float
+    capture_interval_sec_min: int
+    capture_interval_sec_max: int
 
 
 MEASUREMENT_CONFIG = MeasurementConfig(
-    CAMERA_BRIGHTNESS_MIN,
-    CAMERA_BRIGHTNESS_MAX,
-    CAMERA_MAX_SATURATED_FRACTION,
-    CAMERA_MIN_CAPTURE_INTERVAL_SEC,
-    CAMERA_MAX_CAPTURE_INTERVAL_SEC,
+    brightness_min=CAMERA_BRIGHTNESS_MIN,
+    brightness_max=CAMERA_BRIGHTNESS_MAX,
+    saturated_fraction_threshold=CAMERA_SATURATED_FRACTION_MAX,
+    relative_change_threshold=CAMERA_IMAGE_DIFF_THRESHOLD,
+    capture_interval_sec_min=CAMERA_CAPTURE_INTERVAL_SEC_MIN,
+    capture_interval_sec_max=CAMERA_CAPTURE_INTERVAL_SEC_MAX,
 )
 
 
@@ -81,6 +86,7 @@ def should_skip_image(
     last_stored_time: dt.datetime | None,
     mean_intensity: float,
     saturated_fraction: float,
+    relative_change: float | None,
     config: MeasurementConfig,
 ) -> bool:
     too_dark = mean_intensity < config.brightness_min
@@ -94,7 +100,7 @@ def should_skip_image(
 
     if last_stored_time is not None:
         elapsed = time - last_stored_time
-        overdue = elapsed.total_seconds() >= config.max_capture_interval_sec
+        overdue = elapsed.total_seconds() >= config.capture_interval_sec_max
         log_data(
             logging.DEBUG,
             CAMERA_ID,
@@ -114,7 +120,7 @@ def should_skip_image(
         {"event": "capture_validation", "property": "too_bright", "value": too_bright},
     )
 
-    too_saturated = saturated_fraction > config.max_saturated_fraction
+    too_saturated = saturated_fraction > config.saturated_fraction_threshold
     log_data(
         logging.DEBUG,
         CAMERA_ID,
@@ -125,7 +131,13 @@ def should_skip_image(
         },
     )
 
-    return too_bright or too_saturated
+    if too_bright or too_saturated:
+        return True
+
+    if relative_change is None:
+        return False
+
+    return relative_change >= config.relative_change_threshold
 
 
 def buffer_to_rgb_image(
@@ -217,6 +229,28 @@ def measure_exposure(image_rgb: ipl.Image) -> tuple[float, float]:
     return mean_intensity, saturated_fraction
 
 
+def calculate_image_diff(current: ipl.Image, previous: ipl.Image) -> float:
+    try:
+        current_width = current.Width()
+        current_height = current.Height()
+        previous_width = current.Width()
+        previous_height = current.Height()
+    except Exception as e:
+        raise RuntimeError(f"image size read failed: {e}") from e
+
+    if current_height != previous_height or current_width != previous_width:
+        raise RuntimeError("current and previous images have different dimensions")
+
+    try:
+        cur = current.get_numpy_1D().reshape((current_height, current_width, 4))
+        prv = previous.get_numpy_1D().reshape((previous_height, previous_width, 4))
+    except Exception as e:
+        raise RuntimeError(f"image to numpy failed: {e}") from e
+
+    rel_diff = np.abs(cur - prv) / prv
+    return rel_diff.mean()
+
+
 def main():
     peak.Library.Initialize()
 
@@ -232,7 +266,7 @@ def main():
 
     hotpixel_correction = ipl.HotpixelCorrection()
     last_stored_time: dt.datetime | None = None
-
+    prev_img = None
     while True:
         set_log_level()
         time.sleep(MAIN_LOOP_SLEEP_SEC)
@@ -240,7 +274,7 @@ def main():
         now = dt.datetime.now()
         if last_stored_time is not None:
             elapsed = now - last_stored_time
-            if elapsed.total_seconds() < MEASUREMENT_CONFIG.min_capture_interval_sec:
+            if elapsed.total_seconds() < MEASUREMENT_CONFIG.capture_interval_sec_min:
                 continue
 
         for _ in range(3):
@@ -248,6 +282,8 @@ def main():
                 discard_stale_frames(camera_device)
                 image_rgb = acquire_image(camera_device, hotpixel_correction)
                 mean_intensity, saturated_fraction = measure_exposure(image_rgb)
+                if prev_img is not None:
+                    relative_change = calculate_image_diff(image_rgb, prev_img)
                 break
             except RuntimeError as e:
                 log_data(
@@ -279,6 +315,7 @@ def main():
             last_stored_time,
             mean_intensity,
             saturated_fraction,
+            relative_change,
             MEASUREMENT_CONFIG,
         ):
             log_data(
@@ -292,6 +329,7 @@ def main():
             )
             continue
 
+        prev_img = image_rgb
         with tempfile.NamedTemporaryFile(suffix=".jpg") as f:
             try:
                 ipl.ImageWriter.Write(f.name, image_rgb)
