@@ -1,0 +1,369 @@
+import datetime as dt
+import logging
+import os
+import sys
+import tempfile
+import time
+from dataclasses import dataclass
+
+import numpy as np
+from ids_peak import ids_peak as peak
+from ids_peak_ipl import ids_peak_ipl as ipl
+
+from . import LOG_LEVEL_DEFAULT, LOG_LEVEL_ENV_KEY, notify, store
+from .camera_setup import CameraDevice, queue_buffer, setup_camera
+
+LOG_FILE = "ipv_solar_park_rgb_camera_data_pipeline.log"
+logger = logging.getLogger(__name__)
+logging.basicConfig(
+    filename=LOG_FILE,
+    encoding="utf-8",
+    level=LOG_LEVEL_DEFAULT,
+    format='{"time"="%(asctime)s", %(message)s}',
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+
+CAMERA_ID = "ids_rgb_cam"
+
+CAMERA_BRIGHTNESS_MIN = 15
+CAMERA_BRIGHTNESS_MAX = 240
+CAMERA_SATURATED_FRACTION_MAX = 0.15
+# Minimum change to trigger dynamic image storage.
+CAMERA_IMAGE_DIFF_THRESHOLD = 0.01
+
+# Minimum time between stored images.
+CAMERA_CAPTURE_INTERVAL_SEC_MIN = 30 * 60
+# Maximum time between stored images.
+CAMERA_CAPTURE_INTERVAL_SEC_MAX = 40 * 60
+
+# Time between iterations of the main loop.
+MAIN_LOOP_SLEEP_SEC = 10
+
+
+def log_data(level: int, camera_id: str, data: dict):
+    msg = f'"camera": "{camera_id}"'
+    for key, value in data.items():
+        msg += f', "{key}": "{value}"'
+    logger.log(level, msg)
+
+
+@dataclass
+class MeasurementConfig:
+    brightness_min: float
+    brightness_max: float
+    saturated_fraction_threshold: float
+    relative_change_threshold: float
+    capture_interval_sec_min: int
+    capture_interval_sec_max: int
+
+
+MEASUREMENT_CONFIG = MeasurementConfig(
+    brightness_min=CAMERA_BRIGHTNESS_MIN,
+    brightness_max=CAMERA_BRIGHTNESS_MAX,
+    saturated_fraction_threshold=CAMERA_SATURATED_FRACTION_MAX,
+    relative_change_threshold=CAMERA_IMAGE_DIFF_THRESHOLD,
+    capture_interval_sec_min=CAMERA_CAPTURE_INTERVAL_SEC_MIN,
+    capture_interval_sec_max=CAMERA_CAPTURE_INTERVAL_SEC_MAX,
+)
+
+
+def set_log_level():
+    """Set the log level from the environment variable."""
+    log_level = os.getenv(LOG_LEVEL_ENV_KEY)
+    if log_level is None:
+        return
+
+    level: int | None = getattr(logging, log_level.upper(), None)
+    if not isinstance(level, int):
+        logger.warning(f"invalid log level: {log_level}")
+        return
+
+    logger.setLevel(level)
+
+
+def should_skip_image(
+    time: dt.datetime,
+    last_stored_time: dt.datetime | None,
+    mean_intensity: float,
+    saturated_fraction: float,
+    relative_change: float | None,
+    config: MeasurementConfig,
+) -> bool:
+    too_dark = mean_intensity < config.brightness_min
+    log_data(
+        logging.DEBUG,
+        CAMERA_ID,
+        {"event": "capture_validation", "property": "too_dark", "value": too_dark},
+    )
+    if too_dark:
+        return True
+
+    if last_stored_time is not None:
+        elapsed = time - last_stored_time
+        overdue = elapsed.total_seconds() >= config.capture_interval_sec_max
+        log_data(
+            logging.DEBUG,
+            CAMERA_ID,
+            {
+                "event": "capture_validation",
+                "property": "max_capture_interval_sec",
+                "value": overdue,
+            },
+        )
+        if overdue:
+            return False
+
+    too_bright = mean_intensity > config.brightness_max
+    log_data(
+        logging.DEBUG,
+        CAMERA_ID,
+        {"event": "capture_validation", "property": "too_bright", "value": too_bright},
+    )
+
+    too_saturated = saturated_fraction > config.saturated_fraction_threshold
+    log_data(
+        logging.DEBUG,
+        CAMERA_ID,
+        {
+            "event": "capture_validation",
+            "property": "too_saturated",
+            "value": too_saturated,
+        },
+    )
+
+    if too_bright or too_saturated:
+        return True
+
+    if relative_change is None:
+        return False
+
+    return relative_change >= config.relative_change_threshold
+
+
+def buffer_to_rgb_image(
+    buffer: peak.Buffer, hotpixel_correction: ipl.HotpixelCorrection
+) -> ipl.Image:
+    try:
+        image = ipl.Image.CreateFromSizeAndBuffer(
+            buffer.PixelFormat(),
+            buffer.BasePtr(),
+            buffer.Size(),
+            buffer.Width(),
+            buffer.Height(),
+        )
+    except Exception as e:
+        raise RuntimeError(f"image create failed: {e}") from e
+
+    try:
+        hotpixels = hotpixel_correction.Detect(image)
+    except Exception as e:
+        raise RuntimeError(f"hotpixel detect failed: {e}") from e
+
+    try:
+        image = hotpixel_correction.Correct(image, hotpixels)
+    except Exception as e:
+        raise RuntimeError(f"hotpixel correct failed: {e}") from e
+
+    try:
+        return image.ConvertTo(ipl.PixelFormatName_RGBa8, ipl.ConversionMode_Fast)
+    except Exception as e:
+        raise RuntimeError(f"image convert failed: {e}") from e
+
+
+def discard_stale_frames(camera_device: CameraDevice) -> None:
+    data_stream = camera_device.data_stream
+
+    try:
+        num_buffers = len(list(data_stream.AnnouncedBuffers()))
+    except Exception as e:
+        raise RuntimeError(f"buffer list failed: {e}") from e
+
+    for _ in range(num_buffers):
+        try:
+            buffer = data_stream.WaitForFinishedBuffer(5000)
+        except Exception as e:
+            raise RuntimeError(f"stale buffer wait failed: {e}") from e
+
+        queue_buffer(data_stream, buffer)
+
+
+def acquire_image(
+    camera_device: CameraDevice, hotpixel_correction: ipl.HotpixelCorrection
+) -> ipl.Image:
+    data_stream = camera_device.data_stream
+
+    try:
+        buffer = data_stream.WaitForFinishedBuffer(5000)
+    except Exception as e:
+        raise RuntimeError(f"buffer wait failed: {e}") from e
+
+    try:
+        image_rgb = buffer_to_rgb_image(buffer, hotpixel_correction)
+    except RuntimeError as e:
+        try:
+            queue_buffer(data_stream, buffer)
+        except RuntimeError as queue_error:
+            raise RuntimeError(f"{e}; {queue_error}") from e
+        raise
+
+    queue_buffer(data_stream, buffer)
+    return image_rgb
+
+
+def measure_exposure(image_rgb: ipl.Image) -> tuple[float, float]:
+    try:
+        width = image_rgb.Width()
+        height = image_rgb.Height()
+    except Exception as e:
+        raise RuntimeError(f"image size read failed: {e}") from e
+
+    try:
+        arr = image_rgb.get_numpy_1D().reshape((height, width, 4))
+    except Exception as e:
+        raise RuntimeError(f"image to numpy failed: {e}") from e
+
+    rgb = arr[:, :, :3]
+    luminance = rgb.mean(axis=2)
+    mean_intensity = float(luminance.mean())
+    saturated_fraction = float((luminance >= 255).sum() / luminance.size)
+    return mean_intensity, saturated_fraction
+
+
+def calculate_image_diff(current: ipl.Image, previous: ipl.Image) -> float:
+    try:
+        current_width = current.Width()
+        current_height = current.Height()
+        previous_width = current.Width()
+        previous_height = current.Height()
+    except Exception as e:
+        raise RuntimeError(f"image size read failed: {e}") from e
+
+    if current_height != previous_height or current_width != previous_width:
+        raise RuntimeError("current and previous images have different dimensions")
+
+    try:
+        cur = current.get_numpy_1D().reshape((current_height, current_width, 4))
+        prv = previous.get_numpy_1D().reshape((previous_height, previous_width, 4))
+    except Exception as e:
+        raise RuntimeError(f"image to numpy failed: {e}") from e
+
+    rel_diff = np.abs(cur - prv) / prv
+    return rel_diff.mean()
+
+
+def main():
+    peak.Library.Initialize()
+
+    try:
+        camera_device = setup_camera()
+    except RuntimeError as e:
+        log_data(
+            logging.ERROR, CAMERA_ID, {"event": "camera_setup_failure", "error": str(e)}
+        )
+        raise
+
+    log_data(logging.INFO, CAMERA_ID, {"event": "acquisition_started"})
+
+    hotpixel_correction = ipl.HotpixelCorrection()
+    last_stored_time: dt.datetime | None = None
+    prev_img = None
+    while True:
+        set_log_level()
+        time.sleep(MAIN_LOOP_SLEEP_SEC)
+
+        now = dt.datetime.now()
+        if last_stored_time is not None:
+            elapsed = now - last_stored_time
+            if elapsed.total_seconds() < MEASUREMENT_CONFIG.capture_interval_sec_min:
+                continue
+
+        for _ in range(3):
+            try:
+                discard_stale_frames(camera_device)
+                image_rgb = acquire_image(camera_device, hotpixel_correction)
+                mean_intensity, saturated_fraction = measure_exposure(image_rgb)
+                if prev_img is not None:
+                    relative_change = calculate_image_diff(image_rgb, prev_img)
+                break
+            except RuntimeError as e:
+                log_data(
+                    logging.ERROR,
+                    CAMERA_ID,
+                    {"event": "capture_failure", "error": str(e)},
+                )
+        else:
+            log_data(
+                logging.CRITICAL,
+                CAMERA_ID,
+                {"event": "capture_failed_now_exiting", "attempts": 3},
+            )
+            credentials = notify.get_credentials()
+            if credentials is not None:
+                msg = "[RGBCAM] Image capture failed 3 times in a row. The script has stopped.\n\nCheck the camera, then restart the script."
+                try:
+                    notify.send_error_email(credentials, msg)
+                except Exception as notify_err:
+                    log_data(
+                        logging.ERROR,
+                        CAMERA_ID,
+                        {"event": "notification_failed", "error": str(notify_err)},
+                    )
+            sys.exit(1)
+
+        if should_skip_image(
+            now,
+            last_stored_time,
+            mean_intensity,
+            saturated_fraction,
+            relative_change,
+            MEASUREMENT_CONFIG,
+        ):
+            log_data(
+                logging.INFO,
+                CAMERA_ID,
+                {
+                    "event": "image_rejected_exposure",
+                    "mean_intensity": round(mean_intensity, 2),
+                    "saturated_fraction": round(saturated_fraction, 4),
+                },
+            )
+            continue
+
+        prev_img = image_rgb
+        with tempfile.NamedTemporaryFile(suffix=".jpg") as f:
+            try:
+                ipl.ImageWriter.Write(f.name, image_rgb)
+            except Exception as e:
+                log_data(
+                    logging.ERROR,
+                    CAMERA_ID,
+                    {"event": "image_write_error", "path": f.name, "error": str(e)},
+                )
+                continue
+            log_data(
+                logging.INFO, CAMERA_ID, {"event": "image_saved_local", "path": f.name}
+            )
+
+            s3_object_key = store.store_image_in_s3(f.name, now, CAMERA_ID)
+
+        if s3_object_key is None:
+            log_data(logging.ERROR, CAMERA_ID, {"event": "storage_failure"})
+            continue
+
+        store.register_image_in_influxdb(now, s3_object_key, CAMERA_ID)
+
+        last_stored_time = now
+        log_data(
+            logging.INFO,
+            CAMERA_ID,
+            {
+                "event": "image_stored",
+                "mean_intensity": round(mean_intensity, 2),
+                "saturated_fraction": round(saturated_fraction, 4),
+            },
+        )
+
+
+if __name__ == "__main__":
+    logger.info('"event": "script_start"')
+    main()
