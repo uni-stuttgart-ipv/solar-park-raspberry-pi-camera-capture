@@ -160,7 +160,7 @@ def buffer_to_rgb_image(
         raise RuntimeError(f"hotpixel detect failed: {e}") from e
 
     try:
-        image = hotpixel_correction.Correct(image, hotpixels)
+        image = hotpixel_correction.Correct(image, ipl.VectorPoint2D(hotpixels))
     except Exception as e:
         raise RuntimeError(f"hotpixel correct failed: {e}") from e
 
@@ -180,7 +180,7 @@ def discard_stale_frames(camera_device: CameraDevice) -> None:
 
     for _ in range(num_buffers):
         try:
-            buffer = data_stream.WaitForFinishedBuffer(5000)
+            buffer = data_stream.WaitForFinishedBuffer(peak.Timeout(5000))
         except Exception as e:
             raise RuntimeError(f"stale buffer wait failed: {e}") from e
 
@@ -193,7 +193,7 @@ def acquire_image(
     data_stream = camera_device.data_stream
 
     try:
-        buffer = data_stream.WaitForFinishedBuffer(5000)
+        buffer = data_stream.WaitForFinishedBuffer(peak.Timeout(5000))
     except Exception as e:
         raise RuntimeError(f"buffer wait failed: {e}") from e
 
@@ -303,11 +303,11 @@ def main():
                 msg = "[RGBCAM] Image capture failed 3 times in a row. The script has stopped.\n\nCheck the camera, then restart the script."
                 try:
                     notify.send_error_email(credentials, msg)
-                except Exception as notify_err:
+                except Exception as err:
                     log_data(
                         logging.ERROR,
                         CAMERA_ID,
-                        {"event": "notification_failed", "error": str(notify_err)},
+                        {"event": "notification_failed", "error": err},
                     )
             sys.exit(1)
 
